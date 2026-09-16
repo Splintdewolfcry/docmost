@@ -37,6 +37,19 @@ import {
 } from '../../../core/attachment/attachment.utils';
 import { AttachmentType } from '../../../core/attachment/attachment.constants';
 
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 @Injectable()
 export class ImportService {
   private readonly logger = new Logger(ImportService.name);
@@ -93,6 +106,7 @@ export class ImportService {
           spaceId,
           pageId,
           userId,
+          `${fileName}${fileExtension}`,
         );
       }
     } catch (err) {
@@ -206,12 +220,12 @@ export class ImportService {
     spaceId: string,
     pageId: string,
     userId: string,
+    fileNameWithExt?: string,
   ): Promise<any> {
-    let processPdfWithImages: any;
+    let pdfInspector: any;
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const pdfInspector = require('@docmost/pdf-inspector');
-      processPdfWithImages = pdfInspector.processPdfWithImages;
+      pdfInspector = require('@docmost/pdf-inspector');
     } catch (err) {
       this.logger.error(
         'PDF import requested but @docmost/pdf-inspector is not installed',
@@ -222,17 +236,75 @@ export class ImportService {
       );
     }
 
+    const processPdfWithImages = pdfInspector.processPdfWithImages;
     const result = processPdfWithImages(fileBuffer);
     let markdown: string = result.markdown ?? '';
 
+    // The inspector returns no markdown for pages classified as needing OCR
+    // (ImageBased/Mixed) even when native selectable text exists — extractText
+    // still returns it. Without a fallback the import silently creates a
+    // title-only empty page with no error.
+    let fallbackText = '';
     if (!markdown || !markdown.trim()) {
-      return this.processHTML('<p></p>');
+      try {
+        fallbackText = pdfInspector.extractText?.(fileBuffer) ?? '';
+      } catch (err) {
+        this.logger.warn('PDF extractText fallback failed', err as Error);
+        fallbackText = '';
+      }
     }
 
-    if (result.images && result.images.length > 0) {
-      markdown = await this.rewritePdfImagePlaceholders(
-        markdown,
-        result.images,
+    if ((!markdown || !markdown.trim()) && (!fallbackText || !fallbackText.trim())) {
+      // Truly no extractable text (e.g. scanned PDF): preserve the original
+      // file as a viewable attachment instead of a silent empty page so the
+      // PDF is visible in both the page content and the attachments tab.
+      return this.processPdfAsAttachment(
+        fileBuffer,
+        workspaceId,
+        spaceId,
+        pageId,
+        userId,
+        fileNameWithExt,
+      );
+    }
+
+    if (markdown && markdown.trim()) {
+      if (result.images && result.images.length > 0) {
+        markdown = await this.rewritePdfImagePlaceholders(
+          markdown,
+          result.images,
+          workspaceId,
+          spaceId,
+          pageId,
+          userId,
+        );
+      }
+
+      const html = await markdownToHtml(markdown);
+      return this.processHTML(html);
+    }
+
+    // Markdown was empty but native text exists: render the text as paragraphs
+    // and append any embedded images (extractImages finds images even when
+    // processPdfWithImages returns none alongside undefined markdown).
+    let images: Array<{
+      data: Buffer;
+      format: string;
+      width: number;
+      height: number;
+      page: number;
+    }> = [];
+    try {
+      images = pdfInspector.extractImages?.(fileBuffer) ?? [];
+    } catch (err) {
+      this.logger.warn('PDF extractImages fallback failed', err as Error);
+      images = [];
+    }
+
+    let imagesHtml = '';
+    if (images.length > 0) {
+      imagesHtml = await this.uploadPdfImages(
+        images,
         workspaceId,
         spaceId,
         pageId,
@@ -240,8 +312,14 @@ export class ImportService {
       );
     }
 
-    const html = await markdownToHtml(markdown);
-    return this.processHTML(html);
+    const paragraphsHtml = fallbackText
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .map((line) => `<p>${escapeHtml(line)}</p>`)
+      .join('');
+
+    return this.processHTML(paragraphsHtml + imagesHtml);
   }
 
   async rewritePdfImagePlaceholders(
@@ -297,7 +375,19 @@ export class ImportService {
         const width = img.width || 600;
         const imgTag = `<img src="${apiFilePath}" data-attachment-id="${attachmentId}" width="${width}" data-align="center" alt="PDF image ${i + 1}">`;
 
-        result = result.split(placeholder).join(imgTag);
+        // Replace the full markdown image `![alt](pdf-image://N)` with the raw
+        // <img> tag. Replacing only the bare placeholder leaves behind broken
+        // `![image](<img ...>)` markdown which marked renders as a mangled
+        // `<img src="img%20src=...">` node.
+        const markdownImagePattern = new RegExp(
+          `!\\[.*?\\]\\(${escapeRegExp(placeholder)}\\)`,
+          'g',
+        );
+        if (markdownImagePattern.test(result)) {
+          result = result.replace(markdownImagePattern, imgTag);
+        } else {
+          result = result.split(placeholder).join(imgTag);
+        }
       } catch (err: any) {
         this.logger.error(
           `Failed to upload PDF image ${i}: ${err?.message ?? err}`,
@@ -307,6 +397,123 @@ export class ImportService {
     }
 
     return result;
+  }
+
+  /**
+   * Uploads embedded PDF images and returns them as raw <img> HTML so the
+   * caller can append them to fallback content. Used when the inspector
+   * returns images without markdown placeholders.
+   */
+  async uploadPdfImages(
+    images: Array<{
+      data: Buffer;
+      format: string;
+      width: number;
+      height: number;
+      page: number;
+    }>,
+    workspaceId: string,
+    spaceId: string,
+    pageId: string,
+    userId: string,
+  ): Promise<string> {
+    let html = '';
+
+    for (let i = 0; i < images.length; i++) {
+      const img = images[i];
+      const attachmentId = uuid7();
+      const ext = img.format === 'Jpeg' ? '.jpg' : '.png';
+      const fileName = `${attachmentId}${ext}`;
+      const storageFilePath = `${getAttachmentFolderPath(
+        AttachmentType.File,
+        workspaceId,
+      )}/${attachmentId}/${fileName}`;
+      const apiFilePath = `/api/files/${attachmentId}/${fileName}`;
+
+      try {
+        await this.storageService.upload(storageFilePath, img.data);
+
+        await this.db
+          .insertInto('attachments')
+          .values({
+            id: attachmentId,
+            filePath: storageFilePath,
+            fileName,
+            fileSize: img.data.length,
+            mimeType: getMimeType(fileName),
+            type: AttachmentType.File,
+            fileExt: ext,
+            creatorId: userId,
+            workspaceId,
+            pageId,
+            spaceId,
+          })
+          .execute();
+
+        const width = img.width || 600;
+        html += `<img src="${apiFilePath}" data-attachment-id="${attachmentId}" width="${width}" data-align="center" alt="PDF image ${i + 1}">`;
+      } catch (err: any) {
+        this.logger.error(
+          `Failed to upload PDF image ${i}: ${err?.message ?? err}`,
+        );
+      }
+    }
+
+    return html;
+  }
+
+  /**
+   * Last-resort PDF import: stores the original file as an attachment and
+   * embeds it as a pdf viewer node so the page is never silently empty and
+   * the file shows up in the attachments tab.
+   */
+  async processPdfAsAttachment(
+    fileBuffer: Buffer,
+    workspaceId: string,
+    spaceId: string,
+    pageId: string,
+    userId: string,
+    fileNameWithExt?: string,
+  ): Promise<any> {
+    const safeFileName =
+      fileNameWithExt && fileNameWithExt.trim().length > 0
+        ? fileNameWithExt
+        : `${pageId}.pdf`;
+    const attachmentId = uuid7();
+    const storageFilePath = `${getAttachmentFolderPath(
+      AttachmentType.File,
+      workspaceId,
+    )}/${attachmentId}/${safeFileName}`;
+    const apiFilePath = `/api/files/${attachmentId}/${safeFileName}`;
+
+    await this.storageService.upload(storageFilePath, fileBuffer);
+
+    await this.db
+      .insertInto('attachments')
+      .values({
+        id: attachmentId,
+        filePath: storageFilePath,
+        fileName: safeFileName,
+        fileSize: fileBuffer.length,
+        mimeType: getMimeType(safeFileName),
+        type: AttachmentType.File,
+        fileExt: '.pdf',
+        creatorId: userId,
+        workspaceId,
+        pageId,
+        spaceId,
+      })
+      .execute();
+
+    const pdfNodeHtml =
+      `<div data-type="pdf" src="${apiFilePath}" ` +
+      `data-name="${escapeHtml(safeFileName)}" ` +
+      `data-attachment-id="${attachmentId}" ` +
+      `data-size="${fileBuffer.length}" width="800" height="600"></div>`;
+
+    return this.processHTML(
+      `<p>PDF import could not extract text from this file. The original PDF is embedded below.</p>${pdfNodeHtml}`,
+    );
   }
 
   async createYdoc(prosemirrorJson: any): Promise<Buffer | null> {

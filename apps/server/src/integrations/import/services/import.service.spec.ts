@@ -6,6 +6,8 @@ import { QueueName } from '../../queue/constants/queue.constants';
 
 jest.mock('@docmost/pdf-inspector', () => ({
   processPdfWithImages: jest.fn(),
+  extractText: jest.fn(),
+  extractImages: jest.fn(),
 }));
 
 jest.mock('@docmost/editor-ext', () => ({
@@ -23,14 +25,14 @@ jest.mock('../utils/import-formatter', () => ({
 }));
 
 jest.mock('cheerio', () => ({
-  load: jest.fn(() => ({
-    html: jest.fn().mockReturnValue(''),
+  load: jest.fn((htmlInput?: string) => ({
+    html: jest.fn().mockReturnValue(htmlInput ?? ''),
     root: jest.fn(),
   })),
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { processPdfWithImages } = require('@docmost/pdf-inspector');
+const { processPdfWithImages, extractText, extractImages } = require('@docmost/pdf-inspector');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { markdownToHtml } = require('@docmost/editor-ext');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -115,6 +117,8 @@ describe('ImportService - processPdf', () => {
       pageCount: 5,
       pdfType: 'Scanned',
     });
+    extractText.mockReturnValue('');
+    extractImages.mockReturnValue([]);
 
     htmlToJson.mockReturnValue({
       type: 'doc',
@@ -127,10 +131,17 @@ describe('ImportService - processPdf', () => {
       'space-1',
       'page-1',
       'user-1',
+      'scanned.pdf',
     );
 
     expect(result).toBeDefined();
     expect(result.content[0].type).toBe('paragraph');
+    // Original PDF preserved as an attachment instead of a silent empty page
+    expect(storageService.upload).toHaveBeenCalledTimes(1);
+    expect(db.insertInto).toHaveBeenCalledWith('attachments');
+    expect(htmlToJson).toHaveBeenCalled();
+    const htmlArg = htmlToJson.mock.calls[0][0] as string;
+    expect(htmlArg).toContain('data-type="pdf"');
   });
 
   it('uploads images and replaces pdf-image:// placeholders', async () => {
@@ -183,5 +194,44 @@ describe('ImportService - processPdf', () => {
     expect(capturedMarkdown).not.toContain('pdf-image://0');
     expect(capturedMarkdown).toContain('<img');
     expect(capturedMarkdown).toContain('/api/files/');
+    // Full markdown image syntax must be replaced, not just the bare URL —
+    // otherwise marked renders a mangled `![image](<img ...>)` node.
+    expect(capturedMarkdown).not.toContain('![image](<img');
+  });
+
+  it('falls back to extractText when markdown is empty but native text exists', async () => {
+    processPdfWithImages.mockReturnValue({
+      markdown: undefined,
+      images: [],
+      pageCount: 1,
+      pdfType: 'ImageBased',
+    });
+    extractText.mockReturnValue(
+      'Doc With Image\n\nText before image.\nText after image that should be visible.\n',
+    );
+    extractImages.mockReturnValue([]);
+
+    htmlToJson.mockReturnValue({
+      type: 'doc',
+      content: [{ type: 'paragraph' }],
+    });
+
+    const result = await service.processPdf(
+      Buffer.from('fake-pdf'),
+      'ws-1',
+      'space-1',
+      'page-1',
+      'user-1',
+      'report.pdf',
+    );
+
+    expect(extractText).toHaveBeenCalled();
+    expect(result).toBeDefined();
+    // Fallback renders native text as paragraphs rather than an empty page,
+    // and does not consume the original-PDF attachment path.
+    const htmlArg = htmlToJson.mock.calls[0][0] as string;
+    expect(htmlArg).toContain('Text before image.');
+    expect(htmlArg).toContain('Text after image that should be visible.');
+    expect(htmlArg).not.toContain('data-type="pdf"');
   });
 });
