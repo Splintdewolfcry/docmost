@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 FROM node:26-slim AS base
 LABEL org.opencontainers.image.source="https://github.com/docmost/docmost"
 
@@ -7,10 +8,25 @@ FROM base AS builder
 
 WORKDIR /app
 
+# Copy manifests first so dependency install is cached across source changes.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches/ ./patches/
+COPY apps/client/package.json ./apps/client/
+COPY apps/server/package.json ./apps/server/
+COPY packages/base-formula/package.json ./packages/base-formula/
+COPY packages/editor-ext/package.json ./packages/editor-ext/
+
+# Shared pnpm store cache: deps are downloaded once, reused across stages & rebuilds.
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
+
+# Now copy the rest of the source and build.
 COPY . .
 
-RUN pnpm install --frozen-lockfile
-RUN pnpm build
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    --mount=type=cache,target=/app/apps/client/node_modules/.vite \
+    --mount=type=cache,target=/app/node_modules/.cache \
+    pnpm build
 
 FROM base AS installer
 
@@ -47,11 +63,14 @@ COPY --from=builder /app/pnpm*.yaml /app/
 # Copy patches
 COPY --from=builder /app/patches /app/patches
 
+# Install prod deps as root so the cache mount (under /root) is writable
+# and the store is shared with the builder stage.
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile --prod && rm -rf /root/.cache/pnpm /home/node/.cache/pnpm
+
 RUN chown -R node:node /app
 
 USER node
-
-RUN pnpm install --frozen-lockfile --prod && rm -rf /home/node/.cache/pnpm
 
 RUN mkdir -p /app/data/storage
 
