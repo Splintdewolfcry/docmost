@@ -236,52 +236,103 @@ export class ImportService {
       );
     }
 
-    const processPdfWithImages = pdfInspector.processPdfWithImages;
-    const result = processPdfWithImages(fileBuffer);
-    let markdown: string = result.markdown ?? '';
+    // Page count drives the page-number anchors used for bidirectional links
+    let pageCount = 0;
+    try {
+      pageCount = pdfInspector.classifyPdf?.(fileBuffer)?.pageCount ?? 0;
+    } catch (err) {
+      this.logger.warn('PDF classifyPdf failed', err as Error);
+    }
 
-    // The inspector returns no markdown for pages classified as needing OCR
-    // (ImageBased/Mixed) even when native selectable text exists — extractText
-    // still returns it. Without a fallback the import silently creates a
-    // title-only empty page with no error.
+    // Per-page markdown is the most reliable text source: it returns text even
+    // for pages processPdfWithImages classifies as needing OCR (ImageBased/Mixed).
+    let pageEntries: Array<{
+      page: number;
+      markdown: string;
+      needsOcr: boolean;
+    }> = [];
+    try {
+      pageEntries = pdfInspector.extractPagesMarkdown?.(fileBuffer)?.pages ?? [];
+    } catch (err) {
+      this.logger.warn('PDF extractPagesMarkdown failed', err as Error);
+    }
+
+    const hasPageText = pageEntries.some(
+      (entry) => (entry.markdown ?? '').trim().length > 0,
+    );
+
+    let fullResult: any = null;
     let fallbackText = '';
-    if (!markdown || !markdown.trim()) {
+    if (!hasPageText) {
       try {
-        fallbackText = pdfInspector.extractText?.(fileBuffer) ?? '';
+        fullResult = pdfInspector.processPdfWithImages(fileBuffer);
       } catch (err) {
-        this.logger.warn('PDF extractText fallback failed', err as Error);
-        fallbackText = '';
+        this.logger.warn('PDF processPdfWithImages failed', err as Error);
+      }
+      if (!fullResult?.markdown?.trim()) {
+        try {
+          fallbackText = pdfInspector.extractText?.(fileBuffer) ?? '';
+        } catch (err) {
+          this.logger.warn('PDF extractText fallback failed', err as Error);
+        }
       }
     }
 
-    if ((!markdown || !markdown.trim()) && (!fallbackText || !fallbackText.trim())) {
-      // Truly no extractable text (e.g. scanned PDF): preserve the original
-      // file as a viewable attachment instead of a silent empty page so the
-      // PDF is visible in both the page content and the attachments tab.
-      return this.processPdfAsAttachment(
+    if (!pageCount) {
+      pageCount = Math.max(
+        fullResult?.pageCount ?? 0,
+        pageEntries.length ?? 0,
+      );
+    }
+
+    const hasFullText = !!fullResult?.markdown?.trim();
+    const hasText = hasPageText || hasFullText || !!fallbackText.trim();
+
+    // Always preserve the original file: it powers the embedded viewer, the
+    // attachments tab and the #page=N deep links used by page anchors.
+    const original = await this.storePdfOriginal(
+      fileBuffer,
+      workspaceId,
+      spaceId,
+      pageId,
+      userId,
+      fileNameWithExt,
+    );
+
+    if (!hasText) {
+      // Scanned PDF with no OCR-ed text: leave content as-is, embed the
+      // viewer and expose page-number links for bidirectional referencing.
+      return this.buildScannedPdfPage(original, pageCount);
+    }
+
+    if (hasPageText) {
+      return this.buildPerPagePdfContent(
+        original,
+        pageEntries,
+        pageCount,
+        pdfInspector,
         fileBuffer,
         workspaceId,
         spaceId,
         pageId,
         userId,
-        fileNameWithExt,
       );
     }
 
-    if (markdown && markdown.trim()) {
-      if (result.images && result.images.length > 0) {
+    if (hasFullText) {
+      let markdown: string = fullResult.markdown;
+      if (fullResult.images && fullResult.images.length > 0) {
         markdown = await this.rewritePdfImagePlaceholders(
           markdown,
-          result.images,
+          fullResult.images,
           workspaceId,
           spaceId,
           pageId,
           userId,
         );
       }
-
       const html = await markdownToHtml(markdown);
-      return this.processHTML(html);
+      return this.processHTML(this.buildPdfViewerNodeHtml(original) + html);
     }
 
     // Markdown was empty but native text exists: render the text as paragraphs
@@ -319,7 +370,9 @@ export class ImportService {
       .map((line) => `<p>${escapeHtml(line)}</p>`)
       .join('');
 
-    return this.processHTML(paragraphsHtml + imagesHtml);
+    return this.processHTML(
+      this.buildPdfViewerNodeHtml(original) + paragraphsHtml + imagesHtml,
+    );
   }
 
   async rewritePdfImagePlaceholders(
@@ -463,18 +516,23 @@ export class ImportService {
   }
 
   /**
-   * Last-resort PDF import: stores the original file as an attachment and
-   * embeds it as a pdf viewer node so the page is never silently empty and
-   * the file shows up in the attachments tab.
+   * Stores the original PDF file as an attachment so it can be embedded as a
+   * viewer node, downloaded from the attachments tab, and deep-linked with
+   * #page=N fragments.
    */
-  async processPdfAsAttachment(
+  async storePdfOriginal(
     fileBuffer: Buffer,
     workspaceId: string,
     spaceId: string,
     pageId: string,
     userId: string,
     fileNameWithExt?: string,
-  ): Promise<any> {
+  ): Promise<{
+    attachmentId: string;
+    apiFilePath: string;
+    fileName: string;
+    fileSize: number;
+  }> {
     const safeFileName =
       fileNameWithExt && fileNameWithExt.trim().length > 0
         ? fileNameWithExt
@@ -505,15 +563,159 @@ export class ImportService {
       })
       .execute();
 
-    const pdfNodeHtml =
-      `<div data-type="pdf" src="${apiFilePath}" ` +
-      `data-name="${escapeHtml(safeFileName)}" ` +
-      `data-attachment-id="${attachmentId}" ` +
-      `data-size="${fileBuffer.length}" width="800" height="600"></div>`;
+    return {
+      attachmentId,
+      apiFilePath,
+      fileName: safeFileName,
+      fileSize: fileBuffer.length,
+    };
+  }
 
-    return this.processHTML(
-      `<p>PDF import could not extract text from this file. The original PDF is embedded below.</p>${pdfNodeHtml}`,
+  private encodeFileUrl(apiFilePath: string): string {
+    return encodeURI(apiFilePath);
+  }
+
+  private buildPdfViewerNodeHtml(original: {
+    attachmentId: string;
+    apiFilePath: string;
+    fileName: string;
+    fileSize: number;
+  }): string {
+    return (
+      `<div data-type="pdf" src="${original.apiFilePath}" ` +
+      `data-name="${escapeHtml(original.fileName)}" ` +
+      `data-attachment-id="${original.attachmentId}" ` +
+      `data-size="${original.fileSize}" width="800" height="600"></div>`
     );
+  }
+
+  /**
+   * Scanned PDF without OCR-ed text: the document is left as-is. The original
+   * file is embedded as a viewer and each page gets an anchor paragraph
+   * (data-id="pdf-page-N") linking to the PDF at #page=N. This provides
+   * bidirectional page-number references: doc URL #pdf-page-N scrolls to the
+   * page anchor, and the anchor link opens the PDF at that page number.
+   */
+  async buildScannedPdfPage(
+    original: {
+      attachmentId: string;
+      apiFilePath: string;
+      fileName: string;
+      fileSize: number;
+    },
+    pageCount: number,
+  ): Promise<any> {
+    const fileUrl = this.encodeFileUrl(original.apiFilePath);
+
+    let html =
+      `<p>This PDF has no extractable text (it appears to be a scanned ` +
+      `document), so it is preserved as-is. The original file is embedded ` +
+      `below. Use the page links to reference a specific page number.</p>`;
+    html += this.buildPdfViewerNodeHtml(original);
+
+    if (pageCount > 0) {
+      html += `<h2>Pages</h2>`;
+      for (let n = 1; n <= pageCount; n++) {
+        html +=
+          `<p data-id="pdf-page-${n}">` +
+          `<a href="${fileUrl}#page=${n}">Page ${n}</a>` +
+          `</p>`;
+      }
+    }
+
+    return this.processHTML(html);
+  }
+
+  /**
+   * PDF with extractable (OCR-ed or native) text: builds the most complete
+   * representation possible. The original file is embedded at the top, then
+   * each PDF page becomes a section with:
+   * - an anchored heading (data-id="pdf-page-N") that also links to the
+   *   original PDF at #page=N (bidirectional page-number navigation)
+   * - the page's markdown text
+   * - any images embedded on that page
+   * Sections are separated by page breaks. Scanned pages inside an otherwise
+   * text-based PDF get a note with a deep link to that page in the viewer.
+   */
+  async buildPerPagePdfContent(
+    original: {
+      attachmentId: string;
+      apiFilePath: string;
+      fileName: string;
+      fileSize: number;
+    },
+    pageEntries: Array<{ page: number; markdown: string; needsOcr: boolean }>,
+    pageCount: number,
+    pdfInspector: any,
+    fileBuffer: Buffer,
+    workspaceId: string,
+    spaceId: string,
+    pageId: string,
+    userId: string,
+  ): Promise<any> {
+    let images: Array<{
+      data: Buffer;
+      format: string;
+      width: number;
+      height: number;
+      page: number;
+    }> = [];
+    try {
+      images = pdfInspector.extractImages?.(fileBuffer) ?? [];
+    } catch (err) {
+      this.logger.warn('PDF extractImages failed', err as Error);
+      images = [];
+    }
+
+    const maxImagePage = images.reduce(
+      (max, img) => Math.max(max, img.page ?? 0),
+      0,
+    );
+    const totalPages = Math.max(pageCount, pageEntries.length, maxImagePage, 1);
+    const fileUrl = this.encodeFileUrl(original.apiFilePath);
+
+    let html = this.buildPdfViewerNodeHtml(original);
+
+    for (let n = 1; n <= totalPages; n++) {
+      if (n > 1) {
+        html += `<div data-type="pageBreak"></div>`;
+      }
+
+      html +=
+        `<h2 data-id="pdf-page-${n}">` +
+        `<a href="${fileUrl}#page=${n}">Page ${n}</a>` +
+        `</h2>`;
+
+      const entry = pageEntries.find((p) => p.page === n - 1);
+      // Strip pdf-image:// placeholders (per-page markdown is combined with
+      // real uploaded images below, keyed by the image's page number).
+      const pageMarkdown = (entry?.markdown ?? '')
+        .replace(/!\[[^\]]*\]\(pdf-image:\/\/\d+\)/g, '')
+        .replace(/pdf-image:\/\/\d+/g, '')
+        .trim();
+
+      const pageImages = images.filter((img) => img.page === n);
+
+      if (pageMarkdown) {
+        html += await markdownToHtml(pageMarkdown);
+      }
+      if (pageImages.length > 0) {
+        html += await this.uploadPdfImages(
+          pageImages,
+          workspaceId,
+          spaceId,
+          pageId,
+          userId,
+        );
+      }
+      if (!pageMarkdown && pageImages.length === 0) {
+        html +=
+          `<p>No extractable text on this page (scanned). ` +
+          `<a href="${fileUrl}#page=${n}">View page ${n} in the PDF</a>.</p>`;
+      }
+    }
+
+    return this.processHTML(html);
   }
 
   async createYdoc(prosemirrorJson: any): Promise<Buffer | null> {

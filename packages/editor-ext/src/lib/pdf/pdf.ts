@@ -14,6 +14,7 @@ export type PdfAttributes = {
   size?: number;
   width?: number;
   height?: number;
+  page?: number | null;
   placeholder?: {
     id: string;
     name: string;
@@ -101,6 +102,19 @@ export const TiptapPdf = Node.create<PdfOptions>({
         renderHTML: (attributes: PdfAttributes) => ({
           height: attributes.height,
         }),
+      },
+      page: {
+        default: null,
+        parseHTML: (element) => {
+          const raw = element.getAttribute("data-page");
+          if (!raw) return null;
+          const num = parseInt(raw, 10);
+          return isNaN(num) || num < 1 ? null : num;
+        },
+        renderHTML: (attributes: PdfAttributes) => {
+          if (!attributes.page) return {};
+          return { "data-page": attributes.page };
+        },
       },
       placeholder: {
         default: null,

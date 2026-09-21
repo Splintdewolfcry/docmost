@@ -7,12 +7,12 @@ services:
       - db
       - redis
     environment:
-      APP_URL: 'http://localhost:3000'
-      APP_SECRET: 'REPLACE_WITH_LONG_SECRET'
-      DATABASE_URL: 'postgresql://docmost:STRONG_DB_PASSWORD@db:5432/docmost'
+      APP_URL: '${APP_URL:-https://docmost.liproject.net}'
+      APP_SECRET: '${APP_SECRET:?Run ./deploy.sh first — APP_SECRET is missing from .env}'
+      DATABASE_URL: 'postgresql://docmost:${DB_PASSWORD:?Run ./deploy.sh first — DB_PASSWORD is missing from .env}@db:5432/docmost'
       REDIS_URL: 'redis://redis:6379'
     ports:
-      - "3000:3000"
+      - "${HTTP_PORT:-3001}:3000"
     restart: unless-stopped
     volumes:
       - docmost:/app/data/storage
@@ -22,7 +22,7 @@ services:
     environment:
       POSTGRES_DB: docmost
       POSTGRES_USER: docmost
-      POSTGRES_PASSWORD: STRONG_DB_PASSWORD
+      POSTGRES_PASSWORD: '${DB_PASSWORD:?Run ./deploy.sh first — DB_PASSWORD is missing from .env}'
     restart: unless-stopped
     volumes:
       - db_data:/var/lib/postgresql

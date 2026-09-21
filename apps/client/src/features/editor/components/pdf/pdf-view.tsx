@@ -1,6 +1,6 @@
 import { NodeViewProps, NodeViewWrapper } from "@tiptap/react";
 import { ActionIcon, Group, Loader, Text, Tooltip } from "@mantine/core";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { getFileUrl } from "@/lib/config.ts";
 import { ResizableWrapper } from "../common/resizable-wrapper";
 import clsx from "clsx";
@@ -8,6 +8,8 @@ import classes from "./pdf-view.module.css";
 import { useTranslation } from "react-i18next";
 import { isInternalFileUrl } from "@docmost/editor-ext";
 import {
+  IconChevronLeft,
+  IconChevronRight,
   IconFileTypePdf,
   IconPaperclip,
   IconTrash,
@@ -17,12 +19,37 @@ export default function PdfView(props: NodeViewProps) {
   const { t } = useTranslation();
   const { editor, node, getPos, selected, updateAttributes } = props;
   const { src, placeholder, width: nodeWidth, height: nodeHeight } = node.attrs;
+  const initialPage =
+    typeof node.attrs.page === "number" && node.attrs.page > 0
+      ? node.attrs.page
+      : null;
   const [hasError, setHasError] = useState(false);
+  const [currentPage, setCurrentPage] = useState<number>(initialPage ?? 1);
+
+  useEffect(() => {
+    if (initialPage) {
+      setCurrentPage(initialPage);
+    }
+  }, [initialPage]);
 
   const safeSrc = useMemo(() => {
     if (!src || !isInternalFileUrl(src)) return null;
     return getFileUrl(src);
   }, [src]);
+
+  // Reload the iframe on page change so the viewer navigates to #page=N
+  const iframeSrc = useMemo(() => {
+    if (!safeSrc) return null;
+    return `${safeSrc}#page=${currentPage}`;
+  }, [safeSrc, currentPage]);
+
+  const handlePrevPage = useCallback(() => {
+    setCurrentPage((p) => Math.max(1, p - 1));
+  }, []);
+
+  const handleNextPage = useCallback(() => {
+    setCurrentPage((p) => p + 1);
+  }, []);
 
   const handleSelect = useCallback(() => {
     const pos = getPos();
@@ -133,8 +160,9 @@ export default function PdfView(props: NodeViewProps) {
           })}
         >
           <iframe
+            key={currentPage}
             className={classes.pdfIframe}
-            src={safeSrc}
+            src={iframeSrc ?? undefined}
             loading="lazy"
             frameBorder="0"
             onError={() => setHasError(true)}
@@ -150,6 +178,33 @@ export default function PdfView(props: NodeViewProps) {
               }
             }}
           />
+          <div
+            className={classes.pageNav}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <ActionIcon
+              size="sm"
+              variant="subtle"
+              color="gray"
+              onClick={handlePrevPage}
+              disabled={currentPage <= 1}
+              aria-label={t("Previous page")}
+            >
+              <IconChevronLeft size={14} />
+            </ActionIcon>
+            <Text size="xs" c="dimmed" className={classes.pageNavLabel}>
+              {currentPage}
+            </Text>
+            <ActionIcon
+              size="sm"
+              variant="subtle"
+              color="gray"
+              onClick={handleNextPage}
+              aria-label={t("Next page")}
+            >
+              <IconChevronRight size={14} />
+            </ActionIcon>
+          </div>
           {editor.isEditable && (
             <div className={classes.hoverMenu}>
               <Tooltip position="top" label={t("Convert to attachment")} withinPortal>
