@@ -1156,6 +1156,8 @@
   "This action cannot be undone.": "Cette action ne peut pas être annulée.",
   "to navigate": "pour naviguer",
   "to close": "pour fermer",
+  "to save": "pour enregistrer",
+  "to reset": "pour réinitialiser",
   "Expand row {{number}}": "Développer la ligne {{number}}",
   "Saving…": "Enregistrement…",
   "Read-only": "Lecture seule",

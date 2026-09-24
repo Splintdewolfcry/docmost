@@ -1156,6 +1156,8 @@
   "This action cannot be undone.": "Это действие нельзя отменить.",
   "to navigate": "для навигации",
   "to close": "для закрытия",
+  "to save": "для сохранения",
+  "to reset": "для сброса",
   "Expand row {{number}}": "Развернуть строку {{number}}",
   "Saving…": "Сохранение…",
   "Read-only": "Только для чтения",

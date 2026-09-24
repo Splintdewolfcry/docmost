@@ -1156,6 +1156,8 @@
   "This action cannot be undone.": "此操作无法撤销。",
   "to navigate": "用于导航",
   "to close": "用于关闭",
+  "to save": "用于保存",
+  "to reset": "用于重置",
   "Expand row {{number}}": "展开第 {{number}} 行",
   "Saving…": "正在保存…",
   "Read-only": "只读",

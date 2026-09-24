@@ -100,7 +100,7 @@ type DetailFieldProps = {
   row: IBaseRow;
   readOnly: boolean;
   onUpdate: (propertyId: string, value: unknown) => void;
-  onEditingChange: (editing: boolean) => void;
+  onEditingChange?: (editing: boolean) => void;
 };
 
 export function DetailField({ property, row, readOnly, onUpdate, onEditingChange }: DetailFieldProps) {

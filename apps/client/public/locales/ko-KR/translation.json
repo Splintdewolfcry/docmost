@@ -1156,6 +1156,8 @@
   "This action cannot be undone.": "이 작업은 되돌릴 수 없습니다.",
   "to navigate": "탐색하려면",
   "to close": "닫으려면",
+  "to save": "저장하려면",
+  "to reset": "재설정하려면",
   "Expand row {{number}}": "행 {{number}} 펼치기",
   "Saving…": "저장 중…",
   "Read-only": "읽기 전용",

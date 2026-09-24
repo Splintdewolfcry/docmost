@@ -1156,6 +1156,8 @@
   "This action cannot be undone.": "この操作は元に戻せません。",
   "to navigate": "移動するには",
   "to close": "閉じるには",
+  "to save": "保存するには",
+  "to reset": "リセットするには",
   "Expand row {{number}}": "行 {{number}} を展開",
   "Saving…": "保存中…",
   "Read-only": "読み取り専用",

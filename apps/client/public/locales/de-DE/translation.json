@@ -1156,6 +1156,8 @@
   "This action cannot be undone.": "Diese Aktion kann nicht rückgängig gemacht werden.",
   "to navigate": "zum Navigieren",
   "to close": "zum Schließen",
+  "to save": "zum Speichern",
+  "to reset": "zum Zurücksetzen",
   "Expand row {{number}}": "Zeile {{number}} erweitern",
   "Saving…": "Wird gespeichert…",
   "Read-only": "Schreibgeschützt",

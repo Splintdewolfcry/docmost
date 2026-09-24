@@ -1156,6 +1156,8 @@
   "This action cannot be undone.": "Цю дію неможливо скасувати.",
   "to navigate": "для навігації",
   "to close": "для закриття",
+  "to save": "для збереження",
+  "to reset": "для скидання",
   "Expand row {{number}}": "Розгорнути рядок {{number}}",
   "Saving…": "Збереження…",
   "Read-only": "Лише читання",
